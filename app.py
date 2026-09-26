@@ -1,121 +1,244 @@
 import os
-
+import glob
 import streamlit as st
+
 from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from langchain_pymupdf4llm import PyMuPDF4LLMLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
-from rag_chatbot import (
-    KNOWLEDGE_DIR,
-    SYSTEM_PROMPT_PATH,
-    TOP_K,
-    buat_model,
-    muat_dokumen,
-    bangun_vectorstore,
-    muat_system_prompt,
-    buat_rag_chain,
-)
-
-# ============================================================
-# 1. PENGATURAN HALAMAN
-# ============================================================
-# Wajib jadi perintah Streamlit pertama: judul tab browser dan ikonnya.
-
+# 1. KONFIGURASI HALAMAN STREAMLIT
 st.set_page_config(
-    page_title="Asisten RUU Ketenagakerjaan",
-    page_icon=":material/gavel:",
+    page_title="Asisten AI PPKD Jakarta Barat",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ============================================================
-# 2. CEK API KEY
-# ============================================================
-# Di laptop, GROQ_API_KEY dibaca dari file .env.
-# Di Streamlit Cloud, GROQ_API_KEY diisi lewat menu Secrets, dan Streamlit
-# otomatis menjadikannya environment variable. Jadi kode yang sama ini
-# jalan di dua tempat tanpa perlu diubah.
+# 2. CUSTOM CSS UNTUK TAMPILAN MODERN
+st.markdown("""
+<style>
+    .main-title {
+        color: #1E3A8A;
+        font-size: 2.2rem;
+        font-weight: 800;
+        margin-bottom: 0px;
+    }
+    .sub-title {
+        color: #4B5563;
+        font-size: 1rem;
+        margin-bottom: 20px;
+    }
+    .info-card {
+        background-color: #F3F4F6;
+        border-radius: 10px;
+        padding: 15px;
+        border-left: 5px solid #2563EB;
+        margin-bottom: 15px;
+    }
+    div.stButton > button {
+        border-radius: 20px;
+        border: 1px solid #2563EB;
+        color: #2563EB;
+        background-color: #EFF6FF;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background-color: #2563EB;
+        color: white;
+        border-color: #2563EB;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-load_dotenv()
-if not os.getenv("GROQ_API_KEY"):
-    st.error(
-        "GROQ_API_KEY belum diisi. Cek file .env (di laptop) "
-        "atau menu Secrets (di Streamlit Cloud)."
+# 3. KONFIGURASI RAG & MODEL
+CHAT_MODEL = "openai/gpt-oss-120b"
+COLLECTION_NAME = "ppkd_jakbar"
+KNOWLEDGE_DIR = "./knowledge_docs"
+SYSTEM_PROMPT_PATH = "./system_prompt.md"
+
+@st.cache_resource
+def inisialisasi_rag():
+    load_dotenv()
+    
+    model = ChatGroq(
+        model=CHAT_MODEL, 
+        temperature=0, 
+        max_tokens=4096
     )
-    st.stop()
+    
+    path_file = sorted(glob.glob(os.path.join(KNOWLEDGE_DIR, "*.pdf")))
+    daftar_dokumen = []
+    for path in path_file:
+        loader = PyMuPDF4LLMLoader(file_path=path, mode="page", use_layout=False)
+        daftar_dokumen.extend(loader.load())
+        
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=4000,
+        chunk_overlap=400,
+        separators=[
+            "\n1. ", "\n2. ", "\n3. ", "\n4. ", "\n5. ", "\n6. ", "\n7. ", "\n8. ",
+            "\nA. ", "\nB. ", "\nC. ", "\nD. ",
+            "\n\n", "\n", " ", ""
+        ]
+    )
+    potongan = splitter.split_documents(daftar_dokumen)
+    
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+    
+    vectorstore = Chroma(collection_name=COLLECTION_NAME, embedding_function=embeddings)
+    vectorstore.reset_collection()
+    vectorstore.add_documents(potongan)
+    
+    # K dinaikkan ke 20 agar semua potongan dokumen langsung terbawa
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 20})
+    
+    base_system_prompt = ""
+    if os.path.exists(SYSTEM_PROMPT_PATH):
+        with open(SYSTEM_PROMPT_PATH, encoding="utf-8") as f:
+            base_system_prompt = f.read()
+        
+    system_prompt_lengkap = base_system_prompt + """
 
-# ============================================================
-# 3. SIAPKAN MESIN CHATBOT (sekali saja, lalu disimpan)
-# ============================================================
-# Streamlit menjalankan ulang SELURUH file ini dari atas setiap kali
-# pengguna berinteraksi (misalnya mengirim pertanyaan).
-# @st.cache_resource membuat fungsi di bawah ini cukup dijalankan SEKALI.
-# Hasilnya disimpan, lalu dipakai ulang, sehingga dokumen tidak dimuat
-# ulang dan vector store tidak dibangun ulang di setiap pertanyaan.
+---
+ATURAN KETAT KELENGKAPAN PROGRAM & KEJURUAN:
+1. **Dilarang Menyimpulkan Status Pendaftaran**:
+   - JANGAN PERNAH menyimpulkan bahwa program "saat ini sedang dibuka" atau "sedang buka pendaftaran".
+   - Gunakan kalimat pembuka netral: *"Berikut adalah daftar kejuruan dan program pelatihan yang diselenggarakan oleh PPKD Jakarta Barat berdasarkan dokumen resmi:"*.
 
-@st.cache_resource(show_spinner="Menyiapkan chatbot, mohon tunggu sebentar...")
-def siapkan_chatbot():
-    model = buat_model()
-    dokumen = muat_dokumen(KNOWLEDGE_DIR)
-    vectorstore = bangun_vectorstore(dokumen)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-    system_prompt = muat_system_prompt(SYSTEM_PROMPT_PATH)
-    return buat_rag_chain(retriever, model, system_prompt)
+2. **WAJIB Menyebutkan SELURUH Program (Tanpa Terlewat/Terpotong)**:
+   Jika pertanyaan berkaitan dengan kejuruan, program, atau pelatihan, Anda WAJIB menyajikan seluruh struktur Bagian 4 secara utuh:
+   - **A. Pelatihan Reguler / Kejuruan Utama (4 Rumpun Lengkap)**:
+     1. Otomotif & Teknik Industri
+     2. Teknologi Informasi, Digital & Komunikasi
+     3. Tata Boga, Jasa & Keamanan
+     4. Kecantikan, Fashion & Kesehatan
+   - **B. Program Kerja Sama / Vokasi Khusus / Green Jobs**
+   - **C. Program Mobile Training Unit (MTU) / Pelatihan Tingkat Kelurahan** (Sebutkan seluruh 8 kejuruan MTU).
 
-rag_chain = siapkan_chatbot()
+3. Jangan memotong daftar hanya pada Rumpun 1. Jika konteks memuat Rumpun 2, 3, 4, Vokasi Khusus, dan MTU, semuanya WAJIB ditampilkan.
+"""
+    
+    rag_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt_lengkap),
+        ("human", "Konteks Dokumen:\n{context}\n\nPertanyaan: {question}"),
+    ])
+    
+    # Fungsi pembantu untuk menggabungkan konteks
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
 
-# ============================================================
-# 4. BUKU CATATAN PERCAKAPAN
-# ============================================================
-# st.session_state adalah tempat menyimpan data yang tidak ikut hilang
-# saat file ini dijalankan ulang. Di sini dipakai untuk mencatat riwayat
-# percakapan: siapa yang bicara ("user" atau "assistant") dan isinya.
-# Sama saja dengan menjaga percakapan terus muncul di atas chat baru
+    generation_chain = (
+        {
+            "context": base_retriever | format_docs, 
+            "question": RunnablePassthrough()
+        }
+        | rag_prompt
+        | model
+        | StrOutputParser()
+    )
+    return RunnableParallel(answer=generation_chain, sources=base_retriever)
 
-if "riwayat" not in st.session_state:
-    st.session_state.riwayat = []
+rag_chain = inisialisasi_rag()
 
-# ============================================================
-# 5. TAMPILAN
-# ============================================================
-
+# 4. SIDEBAR INFOGRAFIS
 with st.sidebar:
-    st.header("Tentang chatbot ini")
-    st.write(
-        "Chatbot ini menjawab pertanyaan berdasarkan artikel berita "
-        "tentang RUU Pelindungan Ketenagakerjaan."
-    )
-    st.caption("Jawaban hanya diambil dari dokumen sumber, bukan dari internet.")
-    if st.button("Mulai percakapan baru"):
-        st.session_state.riwayat = []
+    st.image("https://img.icons8.com/color/96/city-hall.png", width=70)
+    st.title("PPKD Jakarta Barat")
+    st.caption("Pusat Pelatihan Kerja Daerah Dinas Tenaga Kerja, Transmigrasi dan Energi Provinsi DKI Jakarta")
+    st.divider()
+    
+    st.markdown("### 📌 Informasi Penting")
+    st.info("💡 **100% Gratis** untuk warga DKI Jakarta (ber-KTP DKI / Domisili DKI).")
+    
+    st.markdown("### 📍 Alamat Kantor")
+    st.write("Jl. Kamal Raya No. 2, Kel. Tegal Alur, Kec. Kalideres, Jakarta Barat.")
+    st.write("⏰ **Jam Operasional:** Senin - Jumat, 08.00 - 15.00 WIB")
+    
+    st.divider()
+    if st.button("🗑️ Hapus Riwayat Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
 
-st.title("Asisten RUU Ketenagakerjaan")
-st.caption("Tanyakan apa saja seputar RUU Pelindungan Ketenagakerjaan.")
+# 5. HEADER UTAMA & METRICS
+st.markdown('<p class="main-title">🤖 Asisten AI PPKD Jakarta Barat</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Dapatkan informasi lengkap seputar program pelatihan, syarat pendaftaran, dan jadwal operasional secara cepat.</p>', unsafe_allow_html=True)
 
-# Salam pembuka, selalu tampil paling atas.
-with st.chat_message("assistant"):
-    st.markdown(
-        "Halo, silakan ajukan pertanyaan. Contoh: "
-        "*Apa saja poin utama yang dibahas dalam RUU ini?*"
-    )
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric(label="Program Pelatihan", value="20+ Kejuruan", delta="Reguler & MTU")
+with col2:
+    st.metric(label="Biaya Pelatihan", value="Rp 0 (Gratis)", delta="Biaya APBD/APBN")
+with col3:
+    st.metric(label="Sertifikasi", value="BNSP & PPKD", delta="Standar Industri")
 
-# Tampilkan ulang seluruh riwayat percakapan dari buku catatan.
-for pesan in st.session_state.riwayat:
-    with st.chat_message(pesan["role"]):
-        st.markdown(pesan["isi"])
-
+st.divider()
 
 # ============================================================
-# 6. TANYA JAWAB
+# 6. INISIALISASI SESSION STATE & QUICK SUGGESTIONS
 # ============================================================
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Halo! Saya Asisten AI Resmi PPKD Jakarta Barat. Ada yang bisa saya bantu terkait program pelatihan atau pendaftaran?"}
+    ]
 
-pertanyaan = st.chat_input("Tulis pertanyaan Anda di sini...")
+prompt_input = None
 
-if pertanyaan:
-    # Tampilkan pertanyaan, lalu catat ke buku catatan.
-    with st.chat_message("user"):
-        st.markdown(pertanyaan)
-    st.session_state.riwayat.append({"role": "user", "isi": pertanyaan})
+if len(st.session_state.messages) <= 1:
+    st.write("👉 **Pertanyaan yang sering ditanyakan:**")
+    q_col1, q_col2, q_col3 = st.columns(3)
+    
+    with q_col1:
+        if st.button("📋 Apa saja syarat pendaftarannya?", use_container_width=True):
+            prompt_input = "Apa saja syarat pendaftaran pelatihan di PPKD Jakarta Barat?"
+    with q_col2:
+        # PERBAIKAN: Gunakan pertanyaan eksplisit tanpa kata "yang dibuka"
+        if st.button("🎓 Apa saja daftar kejuruan di PPKD JB?", use_container_width=True):
+            prompt_input = "Sebutkan semua program kejuruan yang ada di PPKD JB tanpa terkecuali"
+    with q_col3:
+        if st.button("🗣️ Apakah ada program pelatihan bahasa?", use_container_width=True):
+            prompt_input = "Apakah ada program pelatihan bahasa di PPKD Jakarta Barat?"
 
-    # Minta jawaban ke mesin RAG. .stream() + st.write_stream() membuat
-    # jawaban muncul bertahap, kata demi kata, seperti sedang diketik.
-    with st.chat_message("assistant"):
-        with st.spinner("Mencari jawaban di dokumen..."):
-            jawaban = st.write_stream(rag_chain.stream(pertanyaan))
-    st.session_state.riwayat.append({"role": "assistant", "isi": jawaban})
+if not prompt_input:
+    prompt_input = st.chat_input("Ketik pertanyaan Anda di sini...")
+
+# ============================================================
+# 7. TAMPILKAN RIWAYAT CHAT LAMA
+# ============================================================
+for message in st.session_state.messages:
+    avatar = "🤖" if message["role"] == "assistant" else "🧑‍💻"
+    with st.chat_message(message["role"], avatar=avatar):
+        st.markdown(message["content"])
+
+# ============================================================
+# 8. EKSEKUSI PEMROSESAN PESAN BARU (RAG CHAIN)
+# ============================================================
+if prompt_input:
+    st.session_state.messages.append({"role": "user", "content": prompt_input})
+    with st.chat_message("user", avatar="🧑‍💻"):
+        st.markdown(prompt_input)
+
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("Mencari data dari dokumen resmi PPKD Jakbar..."):
+            res = rag_chain.invoke(prompt_input)
+            jawaban = res["answer"]
+            
+            sumber_list = list(set([os.path.basename(doc.metadata.get("source", "")) for doc in res["sources"]]))
+            
+            st.markdown(jawaban)
+            
+            if sumber_list:
+                with st.expander("📚 Lihat Sumber Dokumen Rujukan"):
+                    for src in sumber_list:
+                        st.write(f"- `{src}`")
+                        
+    st.session_state.messages.append({"role": "assistant", "content": jawaban})
+    st.rerun()

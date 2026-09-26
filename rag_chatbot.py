@@ -1,26 +1,6 @@
 """
 RAG Chatbot sederhana pakai LangChain + Groq + ChromaDB (lokal)
-
-Script ini adalah versi .py dari materi yang sudah dibedah di sesi LangChain:
-- Blok 1: Model, Prompt Template, Output Parser
-- Blok 2: LCEL (pipe, RunnableParallel, RunnablePassthrough)
-- Blok 3: Data Ingestion (Document, Chunking, Embedding, Vector Store)
-- Blok 4: RAG Chain (Context Injection, chain final)
-
-Knowledge document di sini pakai 3 artikel berita asli soal RUU Pelindungan
-Ketenagakerjaan (September 2026), disimpan sebagai file .pdf di folder
-knowledge_docs/.
-
-Loader PDF-nya pakai PyMuPDF4LLMLoader dari package langchain-pymupdf4llm,
-package resmi terpisah (bukan dari langchain_community yang sudah sunset).
-
-Cara jalanin:
-    python rag_chatbot.py
-
-Prasyarat:
-    - File .env berisi GROQ_API_KEY di folder yang sama dengan script ini
-    - Folder knowledge_docs/ berisi file .pdf yang mau dijadikan sumber
-    - Package sudah terinstall (lihat requirements di bagian bawah file)
+Disesuaikan untuk Knowledge Base PPKD Jakarta Barat
 """
 
 import os
@@ -36,27 +16,23 @@ from langchain_core.documents import Document
 from langchain_pymupdf4llm import PyMuPDF4LLMLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 # ============================================================
-# 1. KONFIGURASI
+# 1. KONFIGURASI OPTIMAL UNTUK KNOWLEDGE BASE PPKD
 # ============================================================
 
 CHAT_MODEL = "openai/gpt-oss-120b"
-COLLECTION_NAME = "ruu_ketenagakerjaan"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
-TOP_K = 3
+COLLECTION_NAME = "ppkd_jakbar"
 
-# Folder berisi knowledge document. Semua file .pdf di dalamnya akan
-# dianggap sebagai satu sumber pengetahuan terpisah.
+# Settingan chunk & retrieval yang dinamis dan pas untuk dokumen Bahasa Indonesia
+CHUNK_SIZE = 1200       
+CHUNK_OVERLAP = 250     
+TOP_K = 15
+
 KNOWLEDGE_DIR = "./knowledge_docs"
-
-# System prompt disimpan terpisah dari kode, supaya bisa diubah/di-review
-# tanpa menyentuh logika program, dan supaya jejak revisinya jelas kalau
-# dipakai bersama version control (git).
 SYSTEM_PROMPT_PATH = "./system_prompt.md"
-
 
 # ============================================================
 # 2. SETUP MODEL
@@ -70,23 +46,14 @@ def buat_model() -> ChatGroq:
         reasoning_effort="low",
     )
 
+
 # ============================================================
 # 3. DATA INGESTION (Load -> Split -> Embed -> Store)
 # ============================================================
 
 def muat_dokumen(folder: str) -> list[Document]:
-    """
-    Load semua file .pdf di dalam folder jadi list of Document, pakai
-    PyMuPDF4LLMLoader langsung dari library LangChain (langchain-pymupdf4llm).
-
-    Setiap file di-load lewat loader resmi ini, jadi kita tidak perlu
-    menulis logika parsing PDF sendiri, cukup panggil .load() untuk
-    masing-masing file lalu digabung jadi satu list.
-    """
     daftar_dokumen = []
     path_file = sorted(glob.glob(os.path.join(folder, "*.pdf")))
-    # glob.glob(...) bertugas mencari file yang sudah ditentukan di os.path.join(), 
-    # dan hasilnya berupa daftar nama file yang cocok, dalam bentuk list Python.
 
     if not path_file:
         raise FileNotFoundError(
@@ -95,37 +62,33 @@ def muat_dokumen(folder: str) -> list[Document]:
         )
 
     for path in path_file:
-        # mode="single" -> satu file PDF jadi satu Document (bukan per halaman).
-        # use_layout=False -> ekstraksi teks polos, tanpa mesin deteksi layout/
-        # OCR yang tidak perlu untuk PDF berbasis teks seperti artikel ini
-        # (mempercepat proses dan menghindari pesan "Using Tesseract..." di
-        # konsol yang bisa bikin peserta bingung).
-        loader = PyMuPDF4LLMLoader(file_path=path, mode="single", use_layout=False)
+        # Mengubah mode="page" agar PDF dibaca per halaman dan metadata halaman terjaga
+        loader = PyMuPDF4LLMLoader(file_path=path, mode="page", use_layout=False)
         daftar_dokumen.extend(loader.load())
 
     return daftar_dokumen
 
 
 def bangun_vectorstore(dokumen: list) -> Chroma:
-    """
-    Ubah kumpulan Document jadi vector store siap dicari.
-
-    Tahapannya persis yang sudah dibedah di Blok 3:
-    1. Load   -> sudah dilakukan di muat_dokumen()
-    2. Split  -> potong jadi chunk kecil
-    3. Embed + Store -> simpan ke ChromaDB
-    """
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=1000,
+        chunk_overlap=200,
+        separators=[
+            "\n10.", "\n9.", "\n8.", "\n7.", "\n6.", "\n5.", "\n4.", "\n3.", "\n2.", "\n1.",
+            "\nA.", "\nB.", "\nC.", "\nD.", "\nE.",
+            "\n\n", "\n", " ", ""
+        ]
     )
     potongan = splitter.split_documents(dokumen)
 
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+
     vectorstore = Chroma(
         collection_name=COLLECTION_NAME,
+        embedding_function=embeddings,
     )
-    # reset_collection() dipakai supaya aman dijalankan berulang kali
-    # (script ini bisa dijalankan ulang tanpa bikin data dobel atau error).
     vectorstore.reset_collection()
     vectorstore.add_documents(potongan)
 
@@ -137,45 +100,35 @@ def bangun_vectorstore(dokumen: list) -> Chroma:
 # ============================================================
 
 def format_docs(daftar_dokumen: list[Document]) -> str:
-    """Gabungkan beberapa chunk hasil retrieval jadi satu teks konteks."""
     return "\n\n".join(dok.page_content for dok in daftar_dokumen)
 
-def muat_system_prompt(path: str) -> str:
-    """
-    Baca system prompt dari file .md terpisah.
 
-    Dipisah dari kode supaya system prompt bisa direvisi (oleh siapa pun
-    yang bertanggung jawab atas kualitas jawaban chatbot) tanpa perlu
-    menyentuh atau memahami kode Python-nya sama sekali.
-    """
+def muat_system_prompt(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read()
 
-def buat_rag_chain(retriever, model: ChatGroq, system_prompt: str):
-    """
-    Satukan retriever, prompt, model, dan parser jadi satu chain LCEL.
 
-    system_prompt (dari file system_prompt.md) berisi instruksi statis:
-    peran asisten dan aturan anti-halusinasi. Placeholder {context} dan
-    {question} sengaja TIDAK ditaruh di file itu, karena dua-duanya
-    bukan instruksi tetap, melainkan bagian yang diisi ulang setiap kali
-    ada pertanyaan baru, jadi tetap disusun di sini sebagai pesan "human".
-    """
+def buat_rag_chain(retriever, model: ChatGroq, system_prompt: str):
     rag_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "Konteks:\n{context}\n\nPertanyaan: {question}"),
     ])
 
-    rag_chain = (
-        RunnableParallel(
-            context=retriever | format_docs,
-            question=RunnablePassthrough(),
-        )
+    generation_chain = (
+        {
+            "context": retriever | format_docs,
+            "question": RunnablePassthrough(),
+        }
         | rag_prompt
         | model
         | StrOutputParser()
     )
-    return rag_chain
+
+    full_chain = RunnableParallel(
+        answer=generation_chain,
+        sources=retriever
+    )
+    return full_chain
 
 
 # ============================================================
@@ -183,8 +136,6 @@ def buat_rag_chain(retriever, model: ChatGroq, system_prompt: str):
 # ============================================================
 
 def main():
-    # load_dotenv() harus dipanggil sebelum ChatGroq dibuat, supaya
-    # GROQ_API_KEY sudah ada di environment variable saat dibutuhkan.
     load_dotenv()
     if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError(
@@ -197,9 +148,9 @@ def main():
 
     print(f"Memuat dokumen dari folder '{KNOWLEDGE_DIR}'...")
     dokumen = muat_dokumen(KNOWLEDGE_DIR)
-    print(f"  -> {len(dokumen)} dokumen berhasil dimuat.")
+    print(f"  -> {len(dokumen)} halaman/dokumen berhasil dimuat.")
 
-    print("Membangun vector store dari dokumen...")
+    print("Membangun vector store dari dokumen (menggunakan Multilingual Embedding)...")
     vectorstore = bangun_vectorstore(dokumen)
     retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
 
@@ -219,41 +170,26 @@ def main():
         if not pertanyaan:
             continue
 
-        jawaban = rag_chain.invoke(pertanyaan)
-        print(f"Jawaban : {jawaban}\n")
+        # Eksekusi RAG chain
+        hasil = rag_chain.invoke(pertanyaan)
+        
+        # Format cetak output agar bersih & profesional
+        print("\n" + "="*50)
+        print("JAWABAN:")
+        print("="*50)
+        print(hasil["answer"])
+        
+        print("\n" + "-"*50)
+        print("SUMBER DOKUMEN RELEVAN:")
+        print("-"*50)
+        
+        sumber_unik = list(set([doc.metadata.get("source", "Dokumen Tanpa Nama") for doc in hasil["sources"]]))
+        for i, src in enumerate(sumber_unik, 1):
+            nama_file = os.path.basename(src)
+            print(f"{i}. {nama_file}")
+            
+        print("="*50 + "\n")
 
 
 if __name__ == "__main__":
     main()
-
-# ============================================================
-# KENAPA ADA "if __name__ == '__main__':" DI SINI?
-# ============================================================
-#
-# Python punya "label" tersembunyi bernama __name__ di setiap file .py.
-# Isinya beda tergantung cara file ini dipakai:
-#
-#   - Kalau file ini dijalankan LANGSUNG (python rag_chatbot.py),
-#     maka __name__ otomatis berisi teks "__main__".
-#
-#   - Kalau file ini "dipinjam" fungsinya oleh file lain, misalnya
-#     lewat "from rag_chatbot import muat_dokumen", maka __name__
-#     berisi nama file ini sendiri, yaitu "rag_chatbot", BUKAN "__main__".
-#
-# Baris "if __name__ == '__main__':" ini jadi semacam pertanyaan yang
-# ditanyakan Python ke dirinya sendiri: "Apakah saya sedang dijalankan
-# langsung, atau cuma dipinjam file lain?"
-#
-# Kalau jawabannya "dijalankan langsung", baru main() dipanggil, dan
-# seluruh program (load dokumen, bikin vectorstore, tanya-jawab) jalan.
-#
-# Kalau jawabannya "cuma dipinjam", main() TIDAK dipanggil. Ini penting
-# supaya kalau suatu saat ada script lain yang cuma mau meminjam satu
-# fungsi kecil dari sini (misalnya muat_dokumen() saja), seluruh RAG
-# chatbot ini tidak ikut menyala tanpa diminta.
-#
-# Letaknya WAJIB di paling bawah file, setelah semua fungsi (def ...)
-# selesai didefinisikan. Python membaca file dari atas ke bawah, jadi
-# kalau baris ini ditaruh sebelum fungsi-fungsi yang dipanggil di dalam
-# main() selesai "dikenalkan" ke Python, akan muncul error NameError.
-# ============================================================
