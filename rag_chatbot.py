@@ -4,20 +4,48 @@ Disesuaikan untuk Knowledge Base PPKD Jakarta Barat
 """
 
 import os
+import traceback
 import glob
 
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 from langchain_core.documents import Document
 from langchain_pymupdf4llm import PyMuPDF4LLMLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from typing import Literal
+from pydantic import BaseModel, Field, ValidationError
 
+
+class JawabanChatbot(BaseModel):
+    """Skema jawaban terstruktur untuk Asisten AI PPKD Jakarta Barat."""
+
+    jawaban: str = Field(
+        description="Jawaban lengkap dan jelas untuk pengguna, dalam Bahasa Indonesia."
+    )
+    status: Literal["terjawab", "tidak_ditemukan", "di_luar_topik"] = Field(
+        description=(
+            "'terjawab' jika konteks memuat jawabannya, 'tidak_ditemukan' jika "
+            "informasi tidak ada di dokumen, 'di_luar_topik' jika pertanyaan tidak "
+            "berhubungan dengan PPKD Jakarta Barat."
+        )
+    )
+    tingkat_keyakinan: Literal["tinggi", "sedang", "rendah"] = Field(
+        description="Seberapa yakin jawaban ini didukung penuh oleh konteks yang diberikan."
+    )
+
+
+def validasi_jawaban(hasil: JawabanChatbot) -> JawabanChatbot:
+    """Validasi tambahan sebelum jawaban ditampilkan ke pengguna."""
+    if hasil.status != "terjawab" and not hasil.jawaban.strip():
+        hasil.jawaban = "Informasi tidak ditemukan di dokumen yang tersedia."
+    if hasil.status == "terjawab" and hasil.tingkat_keyakinan == "rendah":
+        hasil.jawaban += "\n\n*Catatan: jawaban ini didukung sebagian oleh dokumen, mohon verifikasi ulang ke sumber resmi.*"
+    return hasil
 
 # ============================================================
 # 1. KONFIGURASI OPTIMAL UNTUK KNOWLEDGE BASE PPKD
@@ -29,7 +57,7 @@ COLLECTION_NAME = "ppkd_jakbar"
 # Settingan chunk & retrieval yang dinamis dan pas untuk dokumen Bahasa Indonesia
 CHUNK_SIZE = 1200       
 CHUNK_OVERLAP = 250     
-TOP_K = 15
+TOP_K = 30
 
 KNOWLEDGE_DIR = "./knowledge_docs"
 SYSTEM_PROMPT_PATH = "./system_prompt.md"
@@ -71,12 +99,12 @@ def muat_dokumen(folder: str) -> list[Document]:
 
 def bangun_vectorstore(dokumen: list) -> Chroma:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=900,
+        chunk_overlap=150,
         separators=[
             "\n10.", "\n9.", "\n8.", "\n7.", "\n6.", "\n5.", "\n4.", "\n3.", "\n2.", "\n1.",
             "\nA.", "\nB.", "\nC.", "\nD.", "\nE.",
-            "\n\n", "\n", " ", ""
+            "\n\n", "\n", "\n-", " ", ""
         ]
     )
     potongan = splitter.split_documents(dokumen)
@@ -109,6 +137,8 @@ def muat_system_prompt(path: str) -> str:
 
 
 def buat_rag_chain(retriever, model: ChatGroq, system_prompt: str):
+    model_terstruktur = model.with_structured_output(JawabanChatbot)
+
     rag_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "Konteks:\n{context}\n\nPertanyaan: {question}"),
@@ -120,16 +150,14 @@ def buat_rag_chain(retriever, model: ChatGroq, system_prompt: str):
             "question": RunnablePassthrough(),
         }
         | rag_prompt
-        | model
-        | StrOutputParser()
+        | model_terstruktur
     )
 
     full_chain = RunnableParallel(
-        answer=generation_chain,
+        jawaban_terstruktur=generation_chain,
         sources=retriever
     )
     return full_chain
-
 
 # ============================================================
 # 5. PROGRAM UTAMA
@@ -170,24 +198,41 @@ def main():
         if not pertanyaan:
             continue
 
-        # Eksekusi RAG chain
-        hasil = rag_chain.invoke(pertanyaan)
-        
+                # Eksekusi RAG chain
+        try:
+            hasil = rag_chain.invoke(pertanyaan)
+            print("\n[DEBUG] Chunk yang diambil retriever:")
+            for i, doc in enumerate(hasil["sources"], 1):
+                print(f"--- Chunk {i} ({os.path.basename(doc.metadata.get('source',''))}) ---")
+                print(doc.page_content[:300])
+                print()
+            jawaban_obj = validasi_jawaban(hasil["jawaban_terstruktur"])
+        except (ValidationError, Exception):
+            print("\n[ERROR ASLI]")
+            traceback.print_exc()
+            jawaban_obj = JawabanChatbot(
+                jawaban="Maaf, terjadi kendala saat memproses jawaban. Coba tanyakan ulang dengan kalimat berbeda.",
+                status="tidak_ditemukan",
+                tingkat_keyakinan="rendah",
+            )
+            hasil = {"sources": []}
+
         # Format cetak output agar bersih & profesional
         print("\n" + "="*50)
         print("JAWABAN:")
         print("="*50)
-        print(hasil["answer"])
-        
+        print(jawaban_obj.jawaban)
+        print(f"\n[status: {jawaban_obj.status} | keyakinan: {jawaban_obj.tingkat_keyakinan}]")
+
         print("\n" + "-"*50)
         print("SUMBER DOKUMEN RELEVAN:")
         print("-"*50)
-        
+
         sumber_unik = list(set([doc.metadata.get("source", "Dokumen Tanpa Nama") for doc in hasil["sources"]]))
         for i, src in enumerate(sumber_unik, 1):
             nama_file = os.path.basename(src)
             print(f"{i}. {nama_file}")
-            
+
         print("="*50 + "\n")
 
 
