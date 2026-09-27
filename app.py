@@ -151,10 +151,11 @@ rag_chain = inisialisasi_rag()
 
 # 4. SIDEBAR INFOGRAFIS
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/city-hall.png", width=70)
+    # Ganti baris st.image dengan nama file gambar kamu
+    st.image("assets/ppkd_logo.png", width=100)
     st.title("PPKD Jakarta Barat")
     st.caption("Pusat Pelatihan Kerja Daerah Dinas Tenaga Kerja, Transmigrasi dan Energi Provinsi DKI Jakarta")
-    st.divider()
+    
     
     st.markdown("### 📌 Informasi Penting")
     st.info("💡 **100% Gratis** untuk warga DKI Jakarta (ber-KTP DKI / Domisili DKI).")
@@ -200,12 +201,11 @@ if len(st.session_state.messages) <= 1:
         if st.button("📋 Apa saja syarat pendaftarannya?", use_container_width=True):
             prompt_input = "Apa saja syarat pendaftaran pelatihan di PPKD Jakarta Barat?"
     with q_col2:
-        # PERBAIKAN: Gunakan pertanyaan eksplisit tanpa kata "yang dibuka"
         if st.button("🎓 Apa saja daftar kejuruan di PPKD JB?", use_container_width=True):
-            prompt_input = "Sebutkan semua program kejuruan yang ada di PPKD JB tanpa terkecuali"
+            prompt_input = "Apa saja daftar kejuruan dan program pelatihan yang diselenggarakan oleh PPKD Jakarta Barat?"
     with q_col3:
-        if st.button("🗣️ Apakah ada program pelatihan bahasa?", use_container_width=True):
-            prompt_input = "Apakah ada program pelatihan bahasa di PPKD Jakarta Barat?"
+        if st.button("🗣️ Apakah ada program pelatihan bahasa asing?", use_container_width=True):
+            prompt_input = "Apakah ada program pelatihan bahasa asing di PPKD Jakarta Barat?"
 
 if not prompt_input:
     prompt_input = st.chat_input("Ketik pertanyaan Anda di sini...")
@@ -214,7 +214,7 @@ if not prompt_input:
 # 7. TAMPILKAN RIWAYAT CHAT LAMA
 # ============================================================
 for message in st.session_state.messages:
-    avatar = "🤖" if message["role"] == "assistant" else "🧑‍💻"
+    avatar = "assets/logo_assisten.png" if message["role"] == "assistant" else "🧑‍💻"
     with st.chat_message(message["role"], avatar=avatar):
         st.markdown(message["content"])
 
@@ -226,7 +226,7 @@ if prompt_input:
     with st.chat_message("user", avatar="🧑‍💻"):
         st.markdown(prompt_input)
 
-    with st.chat_message("assistant", avatar="🤖"):
+    with st.chat_message("assistant", avatar="assets/logo_assisten.png"):
         with st.spinner("Mencari data dari dokumen resmi PPKD Jakbar..."):
             res = rag_chain.invoke(prompt_input)
             jawaban = res["answer"]
