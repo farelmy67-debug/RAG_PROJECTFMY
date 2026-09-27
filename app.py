@@ -15,7 +15,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # 1. KONFIGURASI HALAMAN STREAMLIT
 st.set_page_config(
     page_title="Asisten AI PPKD Jakarta Barat",
-    page_icon="🤖",
+    page_icon="assets/ppkd_logo.png",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -158,7 +158,7 @@ with st.sidebar:
     
     
     st.markdown("### 📌 Informasi Penting")
-    st.info("💡 **100% Gratis** untuk warga DKI Jakarta (ber-KTP DKI / Domisili DKI).")
+    st.info("💡 **100% Gratis** untuk warga DKI Jakarta (ber-KTP DKI Jakarta / Domisili DKI Jakarta).")
     
     st.markdown("### 📍 Alamat Kantor")
     st.write("Jl. Kamal Raya No. 2, Kel. Tegal Alur, Kec. Kalideres, Jakarta Barat.")
@@ -227,7 +227,7 @@ if prompt_input:
         st.markdown(prompt_input)
 
     with st.chat_message("assistant", avatar="assets/logo_assisten.png"):
-        with st.spinner("Mencari data dari dokumen resmi PPKD Jakbar..."):
+        with st.spinner("Mencari data dari informasi yang tersedia..."):
             res = rag_chain.invoke(prompt_input)
             jawaban = res["answer"]
             
