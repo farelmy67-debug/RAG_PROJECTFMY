@@ -113,7 +113,7 @@ def inisialisasi_rag():
         separators=[
             "\n1. ", "\n2. ", "\n3. ", "\n4. ", "\n5. ", "\n6. ", "\n7. ", "\n8. ",
             "\nA. ", "\nB. ", "\nC. ", "\nD. ",
-            "\n\n", "\n", "\n-, " " ", ""
+            "\n\n", "\n", "\n-",  " ", ""
         ]
     )
     potongan = splitter.split_documents(daftar_dokumen)
@@ -126,8 +126,8 @@ def inisialisasi_rag():
     vectorstore.reset_collection()
     vectorstore.add_documents(potongan)
     
-    # K dinaikkan ke 25 agar semua potongan dokumen langsung terbawa
-    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 25})
+    # K dinaikkan ke 30 agar semua potongan dokumen langsung terbawa
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 30})
     
     base_system_prompt = ""
     if os.path.exists(SYSTEM_PROMPT_PATH):

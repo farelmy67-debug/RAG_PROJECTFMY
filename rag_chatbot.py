@@ -99,8 +99,8 @@ def muat_dokumen(folder: str) -> list[Document]:
 
 def bangun_vectorstore(dokumen: list) -> Chroma:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=900,
-        chunk_overlap=150,
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
         separators=[
             "\n10.", "\n9.", "\n8.", "\n7.", "\n6.", "\n5.", "\n4.", "\n3.", "\n2.", "\n1.",
             "\nA.", "\nB.", "\nC.", "\nD.", "\nE.",
